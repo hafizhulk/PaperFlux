@@ -1,4 +1,4 @@
-# Which LLM backend to use: "openai" or "anthropic".
+# Which LLM backend to use: "openai", "anthropic", or "hermes".
 provider: "openai"
 
 openai:
@@ -9,6 +9,10 @@ openai:
 # anthropic:
 #   api_key: "ENV:PAPERFLUX_ANTHROPIC_API_KEY"
 #   model: "claude-opus-4-8"
+
+# Used when provider is "hermes": reuse this machine's Hermes LLM, no key setup.
+# provider: "hermes"
+# hermes: {}  # all overrides optional; auto-detects $HERMES_HOME / ~/.hermes
 
 ui:
   detail_level: "medium"

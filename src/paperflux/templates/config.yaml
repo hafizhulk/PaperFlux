@@ -1,4 +1,4 @@
-# Which LLM backend to use: "openai" or "anthropic".
+# Which LLM backend to use: "openai", "anthropic", or "hermes".
 provider: "openai"
 
 openai:
@@ -9,6 +9,17 @@ openai:
 # anthropic:
 #   api_key: "ENV:PAPERFLUX_ANTHROPIC_API_KEY"
 #   model: "claude-opus-4-8"
+
+# Used when provider is "hermes". All fields are optional: PaperFlux reuses the
+# LLM of whatever Hermes installation runs it (hermes.home, $HERMES_HOME, or
+# ~/.hermes) — no separate API key setup. Uncomment only to override.
+# hermes:
+#   model: "my-preferred-model"      # default: Hermes model.default
+#   provider: "my-hermes-provider"   # default: Hermes top-level model (named entry under Hermes providers:)
+#   base_url: "https://.../v1"       # default: from Hermes config
+#   api_key: "ENV:MY_KEY"            # default: $<key_env> from env or Hermes .env
+#   key_env: "MY_KEY_ENV"            # default: key_env from Hermes config
+#   home: "~/.hermes"                # default: $HERMES_HOME or ~/.hermes (profiles supported)
 
 ui:
   detail_level: "medium"
