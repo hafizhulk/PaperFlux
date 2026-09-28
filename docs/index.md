@@ -6,18 +6,18 @@ description: AI-powered PDF annotation for research papers
 
 # PaperFlux
 
-PaperFlux helps you read scientific papers faster by automatically extracting exact quotations, organizing them by category (e.g., contributions, limitations, claims, evidence), and annotating your PDFs with precise highlights. It also produces a concise, structured summary you can share or extend. PaperFlux works with either OpenAI or Anthropic (Claude) models; you select the backend in `config.yaml` and provide the matching API key.
+PaperFlux helps you read scientific papers faster by automatically extracting exact quotations, organizing them by category (e.g., contributions, limitations, claims, evidence), and annotating your PDFs with precise highlights. It also produces a concise, structured summary you can share or extend. PaperFlux works with OpenAI, Anthropic (Claude), or any Hermes Agent LLM; you select the backend in `config.yaml` and provide the matching API key (no key needed for Hermes).
 
 ## The Idea
 
-- Give the model the paper and let it find the most relevant passages: OpenAI uses server-side file search over a temporary vector store, while Anthropic (Claude) reads the PDF directly in context.
+- Give the model the paper and let it find the most relevant passages: OpenAI uses server-side file search over a temporary vector store, while Anthropic (Claude) and Hermes read the paper in context (PDF natively for Claude, extracted text for Hermes).
 - Ask the model to return structured results (JSON) with exact quotes and page numbers per category.
 - Turn that into actionable artifacts: an annotated PDF with color-coded highlights and a clean Markdown summary.
 - Keep everything reproducible: save the extracted quotes alongside your outputs so you can re-annotate without re-running extraction.
 
 ## Features
 
-- Pluggable LLM backend: OpenAI or Anthropic (Claude), selected via `provider` in config
+- Pluggable LLM backend: OpenAI, Anthropic (Claude), or Hermes Agent, selected via `provider` in config
 - Batch CLI: [options] *.pdf
 - YAML config with LLMs, prompts, colors, defaults
 - Three detail levels (low / medium / high)
@@ -50,10 +50,10 @@ pip install -e ".[dev]"
 
 ### 2. Choose a Provider and Configure the API Key
 
-PaperFlux supports two backends, selected by the `provider` key in `config.yaml`:
+PaperFlux supports three backends, selected by the `provider` key in `config.yaml`:
 
 ```yaml
-# "openai" (default) or "anthropic"
+# "openai" (default), "anthropic", or "hermes"
 provider: "openai"
 
 openai:
@@ -64,9 +64,16 @@ openai:
 anthropic:
 	api_key: "ENV:PAPERFLUX_ANTHROPIC_API_KEY"
 	model: "claude-opus-4-8"
+
+# Used when provider is "hermes": reuse any Hermes Agent LLM, no key setup.
+# hermes: {}  # all overrides optional; auto-detects $HERMES_HOME / ~/.hermes
 ```
 
-Only the selected provider's block is required; PaperFlux validates that the chosen `provider` has a matching configuration block. The `ENV:` prefix means PaperFlux expands the named environment variable at runtime. A PaperFlux-specific key makes it easier to monitor package-related usage and cost separately.
+Only the selected provider's block is required; PaperFlux validates that the chosen `provider` has a matching configuration block (`hermes` needs no block — it auto-detects the Hermes installation on the machine). The `ENV:` prefix means PaperFlux expands the named environment variable at runtime. A PaperFlux-specific key makes it easier to monitor package-related usage and cost separately.
+
+### 2a. Hermes backend (no API key setup)
+
+If [Hermes Agent](https://github.com/NousResearch/hermes-agent) is installed on the machine, set `provider: "hermes"` and skip the key setup entirely. PaperFlux reads the Hermes home (`hermes.home` in config, else `$HERMES_HOME`, else `~/.hermes` — profiles included), takes `base_url`/`model`/`key_env` from its `config.yaml`, and the key from the environment or its `.env`. This works with any Hermes setup — OpenRouter, Anthropic, OpenAI, local models, or whatever the machine is configured to use — because Hermes endpoints are OpenAI-compatible. The PDF text is extracted locally and sent in context, so unlike the OpenAI backend no vector store or `file_search` is involved. Optional overrides (`hermes.base_url/model/api_key/key_env/provider/home/api_mode`) always win over auto-detection. The credential pool (`auth.json`) is consulted before the configured `key_env`, mirroring Hermes' own key rotation; opencode.ai relays get an ephemeral `x-opencode-session` header and the Responses API, exactly like Hermes core.
 
 Choose one of the following setups (substitute `PAPERFLUX_ANTHROPIC_API_KEY` and an `sk-ant-` key when using Anthropic):
 

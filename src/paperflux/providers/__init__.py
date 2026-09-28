@@ -13,6 +13,7 @@ from .base import LLMProvider, ProgressCallback
 _PROVIDERS = {
     "openai": "paperflux.providers.openai_provider:OpenAIProvider",
     "anthropic": "paperflux.providers.anthropic_provider:AnthropicProvider",
+    "hermes": "paperflux.providers.hermes_provider:HermesProvider",
 }
 
 

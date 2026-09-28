@@ -1,6 +1,6 @@
 # PaperFlux
 
-AI-powered PDF annotation for research papers. PaperFlux extracts exact quotations, organizes them by category (contributions, limitations, claims, evidence), and annotates your PDFs with precise highlights. It works with either OpenAI or Anthropic (Claude) models.
+AI-powered PDF annotation for research papers. PaperFlux extracts exact quotations, organizes them by category (contributions, limitations, claims, evidence), and annotates your PDFs with precise highlights. It works with OpenAI, Anthropic (Claude), or any Hermes Agent LLM.
 
 ## Quick Start
 
@@ -32,7 +32,8 @@ export PAPERFLUX_OPENAI_API_KEY="sk-your-key"
 export PAPERFLUX_ANTHROPIC_API_KEY="sk-ant-your-key"
 ```
 
-Select the backend with the `provider` key in `config.yaml` (`"openai"` or `"anthropic"`).
+Select the backend with the `provider` key in `config.yaml` (`"openai"`, `"anthropic"`, or `"hermes"`).
+Use `provider: "hermes"` to reuse the LLM of any Hermes Agent installation on the machine — no API key setup needed.
 
 ### 3. Run
 
@@ -43,7 +44,7 @@ paperflux --config config.yaml path/to/paper.pdf
 
 ## Features
 
-- Pluggable LLM backend: OpenAI or Anthropic (Claude)
+- Pluggable LLM backend: OpenAI, Anthropic (Claude), or Hermes Agent (reuses your Hermes LLM, no key setup)
 - Batch processing: `*.pdf`
 - Three detail levels (low/medium/high)
 - RAG-based extraction with exact quotes

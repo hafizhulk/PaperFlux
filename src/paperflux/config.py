@@ -30,6 +30,25 @@ class AnthropicConfig(BaseModel):
     model: str
 
 
+class HermesConfig(BaseModel):
+    """Hermes Agent LLM configuration (all fields optional = auto-detect).
+
+    When a field is omitted it is read from the Hermes installation on the
+    machine PaperFlux runs on (``hermes.home`` or ``$HERMES_HOME`` or
+    ``~/.hermes``): ``config.yaml`` supplies ``base_url``/``model``/``key_env``
+    and ``.env`` (or the environment) supplies the API key. Explicit fields
+    here always override auto-detection, so the same file works on any
+    machine with Hermes installed without hardcoding one setup.
+    """
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    key_env: Optional[str] = None
+    provider: Optional[str] = None
+    home: Optional[str] = None
+    api_mode: Optional[str] = None
+
+
 class UIConfig(BaseModel):
     """Display and inference settings that control output verbosity, reasoning depth, and highlight colors."""
     detail_level: Literal["low", "medium", "high"] = "medium"
@@ -84,9 +103,10 @@ class Config(BaseModel):
     """Root configuration object, assembled from all sub-section models."""
     _config_dir: Optional[Path] = PrivateAttr(default=None)
 
-    provider: Literal["openai", "anthropic"] = "openai"
+    provider: Literal["openai", "anthropic", "hermes"] = "openai"
     openai: Optional[OpenAIConfig] = None
     anthropic: Optional[AnthropicConfig] = None
+    hermes: Optional[HermesConfig] = Field(default_factory=HermesConfig)
     ui: UIConfig
     extraction_categories: ExtractionCategoriesConfig = Field(default_factory=ExtractionCategoriesConfig)
     matching: MatchingConfig = Field(default_factory=MatchingConfig)
@@ -125,6 +145,8 @@ class Config(BaseModel):
 
 
 # Provider-specific config blocks; only the selected provider's block is used.
+# "hermes" needs no block (auto-detects the local Hermes installation), so it
+# is kept out of the stripping list — an explicit block is just overrides.
 _PROVIDER_CONFIG_KEYS = ("openai", "anthropic")
 
 
