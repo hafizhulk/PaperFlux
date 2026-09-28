@@ -46,6 +46,7 @@ class HermesConfig(BaseModel):
     key_env: Optional[str] = None
     provider: Optional[str] = None
     home: Optional[str] = None
+    api_mode: Optional[str] = None
 
 
 class UIConfig(BaseModel):

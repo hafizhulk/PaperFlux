@@ -116,6 +116,67 @@ def test_resolve_explicit_overrides_need_no_hermes_home(tmp_path, monkeypatch):
         "https://override.example.test/v1", "override-model", "override-key")
 
 
+def test_resolve_falls_back_to_credential_pool(tmp_path, monkeypatch):
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    _write(home / "config.yaml", yaml.safe_dump({
+        "model": {"default": "m", "provider": "go",
+                  "base_url": "https://llm.example.test/v1",
+                  "key_env": "PAPERFLUX_TEST_STALE_KEY"},
+    }))
+    _write(home / "auth.json", json.dumps({"credential_pool": {
+        "go": [{"source": "env:PAPERFLUX_TEST_POOL_KEY",
+                "base_url": "https://llm.example.test/v1"}],
+    }}))
+    _write(home / ".env", "PAPERFLUX_TEST_POOL_KEY=pool-secret\n")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("PAPERFLUX_TEST_STALE_KEY", raising=False)
+    monkeypatch.delenv("PAPERFLUX_TEST_POOL_KEY", raising=False)
+    cfg_file = tmp_path / "config.yaml"
+    _write(cfg_file, _paperflux_config(tmp_path))
+    conn = hp.resolve_connection(load(cfg_file))
+    assert conn.api_key == "pool-secret"
+
+
+def test_pool_wins_over_stale_config_key(tmp_path, monkeypatch):
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    _write(home / "config.yaml", yaml.safe_dump({
+        "model": {"default": "m", "provider": "go",
+                  "base_url": "https://llm.example.test/v1",
+                  "key_env": "PAPERFLUX_TEST_STALE_KEY"},
+    }))
+    _write(home / "auth.json", json.dumps({"credential_pool": {
+        "go": [{"source": "env:PAPERFLUX_TEST_POOL_KEY",
+                "base_url": "https://llm.example.test/v1",
+                "last_status": "ok"}],
+    }}))
+    _write(home / ".env",
+           "PAPERFLUX_TEST_STALE_KEY=stale-secret\n"
+           "PAPERFLUX_TEST_POOL_KEY=live-secret\n")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for var in ("PAPERFLUX_TEST_STALE_KEY", "PAPERFLUX_TEST_POOL_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    cfg_file = tmp_path / "config.yaml"
+    _write(cfg_file, _paperflux_config(tmp_path))
+    assert hp.resolve_connection(load(cfg_file)).api_key == "live-secret"
+
+
+def test_opencode_endpoints_get_session_header(tmp_path, monkeypatch):
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    _write(home / "config.yaml", yaml.safe_dump({
+        "model": {"default": "m", "base_url": "https://opencode.ai/zen/go/v1"},
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    cfg_file = tmp_path / "config.yaml"
+    _write(cfg_file, _paperflux_config(tmp_path, (
+        "hermes:\n  api_key: \"k\"\n"
+    )))
+    conn = hp.resolve_connection(load(cfg_file))
+    assert conn.extra_headers["x-opencode-session"].startswith("paperflux-")
+
+
 def test_resolve_missing_key_raises(tmp_path, monkeypatch):
     home = tmp_path / "hermes-home"
     home.mkdir()
@@ -157,15 +218,33 @@ class _FakeCompletions:
         return self._script.pop(0)
 
 
+class _FakeResponses:
+    def __init__(self, script):
+        self._script = list(script)
+        self.calls = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return self._script.pop(0)
+
+
+class _FakeResponsesResp:
+    def __init__(self, text):
+        self.output_text = text
+        self.status = "completed"
+
+
 class _FakeClient:
     instances = []
     script: list = []
+    responses_script: list = []
 
     def __init__(self, base_url, api_key):
         self.base_url = base_url
         self.api_key = api_key
         self.chat = type("Chat", (), {})()
         self.chat.completions = _FakeCompletions(list(_FakeClient.script))
+        self.responses = _FakeResponses(list(_FakeClient.responses_script))
         _FakeClient.instances.append(self)
 
 
@@ -209,3 +288,74 @@ def test_analyze_pdf_end_to_end(tmp_path, monkeypatch):
     assert client.base_url == "https://llm.example.test/v1"
     assert client.chat.completions.calls[0].get("response_format") == {
         "type": "json_object"}
+
+
+def _hermes_home_with_base(tmp_path, base_url, monkeypatch):
+    home = tmp_path / "hermes-home"
+    home.mkdir(exist_ok=True)
+    _write(home / "config.yaml", yaml.safe_dump({
+        "model": {"default": "m", "base_url": base_url},
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    return home
+
+
+def test_api_mode_opencode_defaults_to_responses(tmp_path, monkeypatch):
+    _hermes_home_with_base(
+        tmp_path, "https://opencode.ai/zen/go/v1", monkeypatch)
+    cfg_file = tmp_path / "config.yaml"
+    _write(cfg_file, _paperflux_config(tmp_path, 'hermes:\n  api_key: "k"\n'))
+    conn = hp.resolve_connection(load(cfg_file))
+    assert conn.api_mode == "responses"
+
+
+def test_api_mode_other_hosts_default_to_chat(tmp_path, monkeypatch):
+    _hermes_home_with_base(
+        tmp_path, "https://llm.example.test/v1", monkeypatch)
+    cfg_file = tmp_path / "config.yaml"
+    _write(cfg_file, _paperflux_config(tmp_path, 'hermes:\n  api_key: "k"\n'))
+    assert hp.resolve_connection(load(cfg_file)).api_mode == "chat_completions"
+
+
+def test_api_mode_override_and_validation(tmp_path, monkeypatch):
+    _hermes_home_with_base(
+        tmp_path, "https://opencode.ai/zen/go/v1", monkeypatch)
+    cfg_file = tmp_path / "config.yaml"
+    _write(cfg_file, _paperflux_config(
+        tmp_path, 'hermes:\n  api_key: "k"\n  api_mode: "chat_completions"\n'))
+    assert hp.resolve_connection(load(cfg_file)).api_mode == "chat_completions"
+    _write(cfg_file, _paperflux_config(
+        tmp_path, 'hermes:\n  api_key: "k"\n  api_mode: "bogus"\n'))
+    with pytest.raises(ValueError, match="api_mode"):
+        hp.resolve_connection(load(cfg_file))
+
+
+def test_analyze_pdf_responses_mode_end_to_end(tmp_path, monkeypatch):
+    _hermes_home_with_base(
+        tmp_path, "https://opencode.ai/zen/go/v1", monkeypatch)
+    monkeypatch.setattr(hp, "AsyncOpenAI", _FakeClient)
+    _FakeClient.instances.clear()
+    _FakeClient.script = []
+    _FakeClient.responses_script = [
+        _FakeResponsesResp(json.dumps({"categories": [{
+            "name": "contributions",
+            "quotes": [{"text": QUOTE, "pages": [1],
+                        "prefix": "Introduction.", "suffix": "Further"}],
+            "category_summary": "Pilot-scale removal result.",
+        }]})),
+        _FakeResponsesResp("## Takeaways\nPilot trials look promising."),
+    ]
+    cfg_file = tmp_path / "config.yaml"
+    _write(cfg_file, _paperflux_config(tmp_path, 'hermes:\n  api_key: "k"\n'))
+    pdf = tmp_path / "paper.pdf"
+    _sample_pdf(pdf)
+
+    result = asyncio.run(
+        hp.HermesProvider().analyze_pdf(pdf, load(cfg_file))
+    )
+    assert result["key_takeaways"].startswith("## Takeaways")
+    assert result["quotes"]["contributions"][0]["text"] == QUOTE
+    client = _FakeClient.instances[0]
+    assert client.responses.calls[0]["text"] == {"format": {"type": "json_object"}}
+    assert client.responses.calls[0]["extra_headers"][
+        "x-opencode-session"].startswith("paperflux-")

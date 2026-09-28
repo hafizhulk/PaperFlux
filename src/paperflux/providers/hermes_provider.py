@@ -22,8 +22,9 @@ any model Hermes is configured to use.
 import json
 import logging
 import os
+import uuid
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 import fitz  # PyMuPDF
@@ -50,6 +51,8 @@ class HermesConnection:
     base_url: str
     api_key: str
     model: str
+    api_mode: str = "chat_completions"
+    extra_headers: Dict[str, str] = field(default_factory=dict)
 
 
 def _read_dotenv(path: Path) -> Dict[str, str]:
@@ -71,6 +74,48 @@ def _read_dotenv(path: Path) -> Dict[str, str]:
         if key:
             values[key] = val
     return values
+
+
+def _pool_key_env(home: Path, base_url: Optional[str],
+                  *names: Optional[str]) -> Optional[str]:
+    """Find an ``env:VAR`` credential source in Hermes' credential pool.
+
+    The pool is Hermes' live key rotation: it wins over the key named in
+    ``config.yaml``, which may be stale. Candidates score by base-URL match,
+    then provider-name match, preferring entries whose last probe was ok.
+    """
+    try:
+        pool = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+        pool = pool.get("credential_pool") or {}
+    except (OSError, ValueError):
+        return None
+    wanted = {n for n in names if n}
+    best = None
+    for pool_name, creds in pool.items():
+        if not creds or not isinstance(creds, list):
+            continue
+        entry = creds[0] if isinstance(creds[0], dict) else {}
+        source = entry.get("source") or ""
+        if not source.startswith("env:"):
+            continue
+        if base_url and entry.get("base_url") == base_url:
+            score = 2
+        elif pool_name in wanted:
+            score = 1
+        else:
+            continue
+        if entry.get("last_status") == "ok":
+            score += 1
+        if best is None or score > best[0]:
+            best = (score, source[len("env:"):])
+    return best[1] if best else None
+
+
+def _lookup_key(key_env: Optional[str], dotenv: Dict[str, str]) -> Optional[str]:
+    """Return ``$<key_env>`` from the environment or the Hermes dotenv."""
+    if not key_env:
+        return None
+    return os.environ.get(key_env) or dotenv.get(key_env)
 
 
 def resolve_hermes_home(explicit_home: Optional[str] = None) -> Path:
@@ -138,11 +183,20 @@ def resolve_connection(cfg: Config) -> HermesConnection:
         or model_section.get("key_env")
     )
 
-    api_key = override_key
-    if not api_key and key_env:
-        api_key = os.environ.get(key_env)
-        if not api_key:
-            api_key = _read_dotenv(home / ".env").get(key_env)
+    dotenv = _read_dotenv(home / ".env")
+    # The credential pool is Hermes' live rotation source and wins over the
+    # key named in config.yaml (which may be stale); the config key_env is
+    # the fallback. Explicit hermes.api_key always wins.
+    pool_env = _pool_key_env(
+        home, base_url, wanted_provider, model_section.get("provider")
+    )
+    api_key = (
+        override_key
+        or _lookup_key(pool_env, dotenv)
+        or _lookup_key(key_env, dotenv)
+    )
+    if api_key and not override_key:
+        key_env = pool_env if _lookup_key(pool_env, dotenv) == api_key else key_env
 
     missing = []
     if not base_url:
@@ -157,8 +211,28 @@ def resolve_connection(cfg: Config) -> HermesConnection:
             f"Hermes home: {home}. Set them via the PaperFlux 'hermes:' block "
             "or fix the Hermes config + key."
         )
+    extra_headers: Dict[str, str] = {}
+    if base_url and "opencode.ai" in base_url:
+        # OpenCode Go relay requires x-opencode-session on every request
+        # (HTTP 400 MissingSessionID otherwise). Per Hermes docs the value is
+        # an opaque per-conversation key carrying no personal data; without a
+        # live Hermes session an ephemeral key per PaperFlux run is correct.
+        extra_headers["x-opencode-session"] = f"paperflux-{uuid.uuid4().hex[:16]}"
+    # Hermes talks to opencode.ai relays via the Responses API (its responses
+    # transport), not chat/completions — mirror that unless overridden.
+    override_mode = getattr(hermes_cfg, "api_mode", None) if hermes_cfg else None
+    if override_mode and override_mode not in ("chat_completions", "responses"):
+        raise ValueError(
+            f"Unknown hermes.api_mode '{override_mode}'. "
+            "Use 'chat_completions' or 'responses'."
+        )
+    api_mode = override_mode or (
+        "responses" if (base_url and "opencode.ai" in base_url)
+        else "chat_completions"
+    )
     return HermesConnection(
-        base_url=str(base_url), api_key=str(api_key), model=str(model)
+        base_url=str(base_url), api_key=str(api_key), model=str(model),
+        api_mode=api_mode, extra_headers=extra_headers,
     )
 
 
@@ -173,11 +247,39 @@ def extract_pdf_text(path: Path) -> str:
     return "\n\n".join(chunks)
 
 
-async def _chat_text(client: AsyncOpenAI, model: str, system: str, user: str,
-                     max_tokens: int, json_mode: bool):
-    """Make one OpenAI-compatible chat completion call."""
-    kwargs: dict = {
-        "model": model,
+async def _complete_text(client: AsyncOpenAI, conn: HermesConnection,
+                         system: str, user: str, max_tokens: int,
+                         json_mode: bool) -> str:
+    """Run one extraction/summary call and return the plain text result.
+
+    Uses the Responses API when the Hermes endpoint needs it (opencode.ai
+    relays, like Hermes itself) and chat/completions everywhere else.
+    """
+    headers = conn.extra_headers or None
+    if conn.api_mode == "responses":
+        kwargs: dict = {
+            "model": conn.model,
+            "input": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_output_tokens": max_tokens,
+            "store": False,
+        }
+        if json_mode:
+            kwargs["text"] = {"format": {"type": "json_object"}}
+        if headers:
+            kwargs["extra_headers"] = headers
+        resp = await client.responses.create(**kwargs)
+        status = getattr(resp, "status", None)
+        if status and status != "completed":
+            raise ValueError(
+                f"Hermes response ended with status='{status}'. Consider "
+                f"increasing ui.max_output_tokens (currently {max_tokens})."
+            )
+        return getattr(resp, "output_text", "") or ""
+    kwargs = {
+        "model": conn.model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -186,7 +288,19 @@ async def _chat_text(client: AsyncOpenAI, model: str, system: str, user: str,
     }
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
-    return await client.chat.completions.create(**kwargs)
+    if headers:
+        kwargs["extra_headers"] = headers
+    resp = await client.chat.completions.create(**kwargs)
+    choice = (getattr(resp, "choices", [None])[0] or None)
+    if getattr(choice, "finish_reason", None) == "length":
+        raise ValueError(
+            "Hermes response was truncated (finish_reason='length'). Consider "
+            f"increasing ui.max_output_tokens (currently {max_tokens})."
+        )
+    try:
+        return choice.message.content if choice else ""
+    except AttributeError:
+        return ""
 
 
 class HermesProvider:
@@ -243,26 +357,13 @@ class HermesProvider:
 
         if progress_callback:
             progress_callback(f"Extracting quotes with Hermes model {conn.model}")
-        resp = await _chat_text(
-            client, conn.model, category_system_prompt, user_msg,
+        text_val = await _complete_text(
+            client, conn, category_system_prompt, user_msg,
             cfg.ui.max_output_tokens, json_mode=True,
         )
-        finish = (getattr(resp, "choices", [None])[0] or None)
-        finish_reason = getattr(finish, "finish_reason", None)
-        if finish_reason == "length":
-            raise ValueError(
-                "Category bundle response was truncated (finish_reason='length'). "
-                f"Consider increasing ui.max_output_tokens (currently "
-                f"{cfg.ui.max_output_tokens}) or lowering detail_level, "
-                "category count, or rag.max_quotes_per_category."
-            )
-        try:
-            text_val = finish.message.content if finish else ""
-        except AttributeError:
-            text_val = ""
         if not text_val or not text_val.strip():
             dump_path = dump_failed_response(
-                "hermes_category_bundle_no_text", str(resp)
+                "hermes_category_bundle_no_text", text_val
             )
             hint = f" (raw saved to {dump_path})" if dump_path else ""
             raise ValueError(
@@ -292,14 +393,10 @@ class HermesProvider:
         )
         if progress_callback:
             progress_callback("Generating summary")
-        summary_resp = await _chat_text(
-            client, conn.model,
+        key_takeaways = await _complete_text(
+            client, conn,
             "You are a meticulous research assistant writing a Markdown summary.",
             summary_msg, cfg.ui.max_output_tokens, json_mode=False,
         )
-        try:
-            key_takeaways = summary_resp.choices[0].message.content or ""
-        except (AttributeError, IndexError):
-            key_takeaways = str(summary_resp)
 
         return {"key_takeaways": key_takeaways, "quotes": quotes}
